@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>路径跟踪控制器回放 · Pure Pursuit / Stanley</title>
+<style>
+  :root {
+    --bg:#0f1419; --panel:#171e26; --ink:#d7e0ea; --dim:#8a99a8;
+    --line:#2a3542; --grid:#202a35;
+    --blue:#3987e5; --green:#199e70; --yellow:#c98500; --red:#e34948;
+    --red-soft:rgba(227,73,73,.12);
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font:14px/1.5 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; }
+  header { padding:14px 20px 10px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0 0 2px; font-size:18px; }
+  header .sub { color:var(--dim); font-size:12px; }
+  .bar { display:flex; flex-wrap:wrap; gap:12px; align-items:center;
+    padding:10px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
+  select, button { background:#10171f; color:var(--ink); border:1px solid var(--line);
+    border-radius:6px; padding:6px 10px; font:inherit; cursor:pointer; }
+  button:hover, select:hover { border-color:#3d4d5f; }
+  button:disabled { opacity:.4; cursor:default; }
+  .spacer { flex:1; }
+  .badge { display:inline-flex; align-items:center; gap:6px; padding:4px 10px;
+    border-radius:99px; font-size:12px; border:1px solid var(--line); }
+  .badge.ok  { color:var(--green); border-color:rgba(25,158,112,.5); }
+  .badge.bad { color:var(--red);   border-color:rgba(227,73,73,.55); background:var(--red-soft); }
+  .params { color:var(--dim); font-size:12px; font-variant-numeric:tabular-nums; }
+  main { padding:16px 20px 24px; }
+  .grid { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,1fr); gap:16px; }
+  @media (max-width:980px){ .grid { grid-template-columns:1fr; } }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    padding:12px 14px; min-width:0; }
+  .card h2 { margin:0 0 8px; font-size:13px; color:var(--dim); font-weight:600; }
+  canvas { display:block; width:100%; height:auto; border-radius:6px; }
+  .legend { display:flex; flex-wrap:wrap; gap:14px; margin-top:8px; font-size:12px; color:var(--dim); }
+  .legend span { display:inline-flex; align-items:center; gap:6px; }
+  .swatch { width:14px; height:3px; border-radius:2px; display:inline-block; }
+  .swatch.dot { width:9px; height:9px; border-radius:50%; }
+  .swatch.dash { background:repeating-linear-gradient(90deg,currentColor 0 5px,transparent 5px 9px); }
+  .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:14px;
+    background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:10px 14px; }
+  .controls input[type=range] { flex:1 1 260px; accent-color:var(--blue); }
+  .frameinfo { font-variant-numeric:tabular-nums; color:var(--dim); font-size:12px; min-width:130px; }
+  .readout { display:grid; grid-template-columns:repeat(6,auto); gap:4px 16px; justify-content:start;
+    margin-top:12px; font-size:12px; font-variant-numeric:tabular-nums; }
+  .readout dt { color:var(--dim); } .readout dd { margin:0; text-align:right; }
+  .tip { position:absolute; pointer-events:none; background:#10171f; border:1px solid var(--line);
+    border-radius:6px; padding:5px 8px; font-size:12px; display:none; white-space:nowrap;
+    font-variant-numeric:tabular-nums; z-index:5; }
+  .wrap { position:relative; }
+  kbd { background:#10171f; border:1px solid var(--line); border-bottom-width:2px; border-radius:4px;
+    padding:0 5px; font-size:11px; color:var(--dim); }
+  .hint { color:var(--dim); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>差速驱动机器人路径跟踪控制器回放</h1>
+  <div class="sub">Pure Pursuit 与 Stanley 几何控制器 · 单文件静态报告（数据与逻辑全部内嵌，无第三方依赖）</div>
+</header>
+
+<div class="bar">
+  <label for="sc" style="color:var(--dim);font-size:12px;">场景</label>
+  <select id="sc" aria-label="选择仿真场景"></select>
+  <span id="verdict" class="badge ok"></span>
+  <span class="spacer"></span>
+  <span id="params" class="params"></span>
+</div>
+
+<main>
+  <div class="grid">
+    <section class="card">
+      <h2>运动回放（俯视）</h2>
+      <div class="wrap">
+        <canvas id="world" height="460" aria-label="机器人沿参考路径运动的俯视图"></canvas>
+      </div>
+      <div class="legend">
+        <span><i class="swatch" style="background:#5b6b7d"></i>参考路径</span>
+        <span><i class="swatch" style="background:var(--blue)"></i>实际轨迹</span>
+        <span><i class="swatch dot" style="background:var(--yellow)"></i>前视点 / 切点</span>
+        <span><i class="swatch dot" style="background:var(--green)"></i>起点</span>
+        <span><i class="swatch dot" style="background:#8a99a8"></i>终点</span>
+        <span><i class="swatch dash" style="color:var(--red)"></i>发散起点</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>横向误差 e(t) —— 正值表示路径在机器人左侧</h2>
+      <div class="wrap">
+        <canvas id="chart" height="460" aria-label="横向误差随时间变化曲线"></canvas>
+        <div id="tip" class="tip"></div>
+      </div>
+      <div class="legend">
+        <span><i class="swatch" style="background:var(--blue)"></i>横向误差 e (m)</span>
+        <span><i class="swatch dash" style="color:var(--red)"></i>发散起点</span>
+        <span><i class="swatch" style="background:#5b6b7d"></i>零线</span>
+      </div>
+    </section>
+  </div>
+
+  <div class="controls">
+    <button id="btnFirst" title="回到首帧 (Home)">⏮</button>
+    <button id="btnPrev"  title="上一帧 (←)">◀</button>
+    <button id="btnPlay"  title="播放/暂停 (空格)">▶ 播放</button>
+    <button id="btnNext"  title="下一帧 (→)">▶</button>
+    <input id="seek" type="range" min="0" step="1" value="0" aria-label="时间轴">
+    <span id="finfo" class="frameinfo"></span>
+    <label for="speed" class="hint">速度</label>
+    <select id="speed" aria-label="回放速度">
+      <option value="0.25">0.25×</option>
+      <option value="0.5">0.5×</option>
+      <option value="1" selected>1×</option>
+      <option value="2">2×</option>
+      <option value="4">4×</option>
+    </select>
+  </div>
+
+  <dl class="readout" id="readout"></dl>
+  <p class="hint" style="margin:10px 2px 0">快捷键：<kbd>空格</kbd> 播放/暂停 · <kbd>←</kbd>/<kbd>→</kbd> 逐帧 · <kbd>Home</kbd>/<kbd>End</kbd> 首尾帧；在误差曲线上拖动可跳转。</p>
+</main>
+
+<script>
+"use strict";
+const DATA = __REPORT_DATA__;
+
+const C = {
+  bg:"#141c25", grid:"#202a35", path:"#5b6b7d", trail:"#3987e5",
+  target:"#c98500", start:"#199e70", end:"#8a99a8", red:"#e34948",
+  ink:"#d7e0ea", dim:"#8a99a8", zero:"#5b6b7d"
+};
+
+const worldCv = document.getElementById("world");
+const chartCv = document.getElementById("chart");
+const wctx = worldCv.getContext("2d");
+const cctx = chartCv.getContext("2d");
+const scSel = document.getElementById("sc");
+const seek = document.getElementById("seek");
+const finfo = document.getElementById("finfo");
+const verdict = document.getElementById("verdict");
+const paramsEl = document.getElementById("params");
+const readout = document.getElementById("readout");
+const tip = document.getElementById("tip");
+
+DATA.scenarios.forEach((s, i) => {
+  const o = document.createElement("option");
+  o.value = i; o.textContent = s.name;
+  scSel.appendChild(o);
+});
+
+let sc = DATA.scenarios[0];
+let idx = 0;
+let playing = false;
+let raf = null;
+let lastWall = 0;
+
+function hiDPISetup(cv) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = parseInt(cv.getAttribute("height"), 10);
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  cv.getContext("2d").setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { w, h };
+}
+
+function fmt(x, n) {
+  if (!isFinite(x)) return "—";
+  return (x >= 0 ? " " : "") + x.toFixed(n);
+}
+
+// --------------------------------------------------------------------- 俯视图
+function drawWorld() {
+  const { w, h } = hiDPISetup(worldCv);
+  const ctx = wctx;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, w, h);
+
+  const b = sc.bounds;
+  const pad = 26;
+  const sx = (w - 2 * pad) / (b[2] - b[0]);
+  const sy = (h - 2 * pad) / (b[3] - b[1]);
+  const s = Math.min(sx, sy);
+  const ox = pad + ((w - 2 * pad) - (b[2] - b[0]) * s) / 2 - b[0] * s;
+  const oy = pad + ((h - 2 * pad) - (b[3] - b[1]) * s) / 2 - b[1] * s;
+  const X = p => p[0] * s + ox;
+  const Y = p => h - (p[1] * s + oy);
+
+  // 网格
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let gx = Math.ceil(b[0]); gx <= b[2]; gx++) {
+    ctx.moveTo(gx * s + ox, 0); ctx.lineTo(gx * s + ox, h);
+  }
+  for (let gy = Math.ceil(b[1]); gy <= b[3]; gy++) {
+    ctx.moveTo(0, h - (gy * s + oy)); ctx.lineTo(w, h - (gy * s + oy));
+  }
+  ctx.stroke();
+
+  // 参考路径
+  ctx.strokeStyle = C.path; ctx.lineWidth = 2;
+  ctx.beginPath();
+  sc.path.forEach((p, i) => i ? ctx.lineTo(X(p), Y(p)) : ctx.moveTo(X(p), Y(p)));
+  ctx.stroke();
+
+  // 已走过的实际轨迹
+  if (idx > 0) {
+    ctx.strokeStyle = C.trail; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = 0; i <= idx; i++) {
+      const f = sc.frames[i];
+      i ? ctx.lineTo(f.x * s + ox, h - (f.y * s + oy))
+        : ctx.moveTo(f.x * s + ox, h - (f.y * s + oy));
+    }
+    ctx.stroke();
+  }
+
+  const f = sc.frames[idx];
+
+  // 发散起点之后的轨迹用红色重描，直观看出失控段
+  const di = sc.stability.startIndex;
+  if (di >= 0 && idx > di) {
+    ctx.strokeStyle = "rgba(227,73,73,.85)"; ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let i = di; i <= idx; i++) {
+      const q = sc.frames[i];
+      i === di ? ctx.moveTo(q.x * s + ox, h - (q.y * s + oy))
+               : ctx.lineTo(q.x * s + ox, h - (q.y * s + oy));
+    }
+    ctx.stroke();
+  }
+
+  // 机器人 → 前视点/切点 连线
+  const rx = f.x * s + ox, ry = h - (f.y * s + oy);
+  ctx.strokeStyle = C.target; ctx.globalAlpha = .55; ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 4]);
+  ctx.beginPath(); ctx.moveTo(rx, ry);
+  ctx.lineTo(f.tx * s + ox, h - (f.ty * s + oy)); ctx.stroke();
+  ctx.setLineDash([]); ctx.globalAlpha = 1;
+
+  // 起终点标记（≥8px，带文字标注）
+  const p0 = sc.path[0], pN = sc.path[sc.path.length - 1];
+  ctx.fillStyle = C.start;
+  ctx.beginPath(); ctx.arc(X(p0), Y(p0), 4.5, 0, 7); ctx.fill();
+  ctx.fillStyle = C.dim; ctx.font = "11px system-ui"; ctx.textAlign = "left";
+  ctx.fillText("起点", X(p0) + 7, Y(p0) - 6);
+  ctx.fillStyle = C.end;
+  ctx.beginPath(); ctx.arc(X(pN), Y(pN), 4.5, 0, 7); ctx.fill();
+  ctx.fillStyle = C.dim;
+  ctx.fillText("终点", X(pN) + 7, Y(pN) + 13);
+
+  // 前视点 / 切点（9px 圆，外加表面色描边以与轨迹线分离）
+  ctx.fillStyle = C.target;
+  ctx.beginPath(); ctx.arc(f.tx * s + ox, h - (f.ty * s + oy), 4.5, 0, 7); ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = C.bg; ctx.stroke();
+
+  // 机器人：航向三角
+  const th = f.th, r = 9;
+  const fx = rx + Math.cos(th) * r, fy = ry - Math.sin(th) * r;
+  const px = -Math.sin(th) * r * .62, py = -Math.cos(th) * r * .62;
+  ctx.fillStyle = C.ink;
+  ctx.beginPath();
+  ctx.moveTo(fx, fy);
+  ctx.lineTo(rx + px, ry - py);
+  ctx.lineTo(rx - px, ry + py);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = C.bg; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+// --------------------------------------------------------------------- 误差图
+function chartGeom() {
+  const w = chartCv.clientWidth, h = parseInt(chartCv.getAttribute("height"), 10);
+  const ml = 58, mr = 14, mt = 16, mb = 34;
+  const fs = sc.frames;
+  let lo = 0, hi = 0;
+  fs.forEach(f => { lo = Math.min(lo, f.e); hi = Math.max(hi, f.e); });
+  const pad = Math.max((hi - lo) * .08, .05);
+  lo -= pad; hi += pad;
+  const tMax = fs[fs.length - 1].t;
+  const X = t => ml + t / tMax * (w - ml - mr);
+  const Y = e => mt + (hi - e) / (hi - lo) * (h - mt - mb);
+  return { w, h, ml, mr, mt, mb, lo, hi, tMax, X, Y };
+}
+
+function drawChart() {
+  hiDPISetup(chartCv);
+  const ctx = cctx;
+  const g = chartGeom();
+  const { w, h, ml, mt, mb, lo, hi } = g;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, w, h);
+
+  // 网格 + 纵轴刻度
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+  ctx.fillStyle = C.dim; ctx.font = "11px system-ui"; ctx.textAlign = "right";
+  const ticks = 5;
+  for (let i = 0; i <= ticks; i++) {
+    const v = lo + (hi - lo) * i / ticks;
+    const yy = g.Y(v);
+    ctx.beginPath(); ctx.moveTo(ml, yy); ctx.lineTo(w - g.mr, yy); ctx.stroke();
+    ctx.fillText(v.toFixed(2), ml - 7, yy + 3.5);
+  }
+  // 横轴时间刻度
+  ctx.textAlign = "center";
+  const tickN = Math.min(8, Math.floor(g.tMax));
+  for (let i = 0; i <= tickN; i++) {
+    const tt = g.tMax * i / tickN;
+    ctx.fillText(tt.toFixed(1) + "s", g.X(tt), h - 12);
+  }
+
+  // 发散区域
+  const di = sc.stability.startIndex;
+  if (di >= 0) {
+    const x0 = g.X(sc.frames[di].t);
+    ctx.fillStyle = "rgba(227,73,73,.10)";
+    ctx.fillRect(x0, mt, w - g.mr - x0, h - mt - mb);
+  }
+
+  // 零线
+  ctx.strokeStyle = C.zero; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(ml, g.Y(0)); ctx.lineTo(w - g.mr, g.Y(0)); ctx.stroke();
+
+  // e(t) 曲线
+  ctx.strokeStyle = C.trail; ctx.lineWidth = 2;
+  ctx.beginPath();
+  sc.frames.forEach((f, i) => i ? ctx.lineTo(g.X(f.t), g.Y(f.e))
+                                : ctx.moveTo(g.X(f.t), g.Y(f.e)));
+  ctx.stroke();
+
+  // 发散起点竖线 + 文字标注（红色始终伴随文字，不单独依赖颜色）
+  if (di >= 0) {
+    const x0 = g.X(sc.frames[di].t);
+    ctx.strokeStyle = C.red; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.moveTo(x0, mt); ctx.lineTo(x0, h - mb); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = C.red; ctx.textAlign = "left"; ctx.font = "11px system-ui";
+    ctx.fillText("⚠ 发散起点 t=" + sc.frames[di].t.toFixed(2) + "s",
+      Math.min(x0 + 6, w - g.mr - 150), mt + 13);
+  }
+
+  // 播放头
+  const f = sc.frames[idx];
+  const px = g.X(f.t);
+  ctx.strokeStyle = C.ink; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px, mt); ctx.lineTo(px, h - mb); ctx.stroke();
+  ctx.fillStyle = C.ink;
+  ctx.beginPath(); ctx.arc(px, g.Y(f.e), 3.5, 0, 7); ctx.fill();
+  ctx.lineWidth = 2; ctx.strokeStyle = C.bg; ctx.stroke();
+}
+
+// --------------------------------------------------------------------- UI
+function render() {
+  drawWorld();
+  drawChart();
+  const f = sc.frames[idx];
+  const st = sc.stability;
+  seek.max = sc.frames.length - 1;
+  seek.value = idx;
+  finfo.textContent = "帧 " + idx + " / " + (sc.frames.length - 1)
+    + " · t=" + f.t.toFixed(2) + "s";
+  if (st.divergent) {
+    verdict.className = "badge bad";
+    verdict.textContent = "⚠ 发散 · 起始帧 " + st.startIndex
+      + "（t=" + st.startTime.toFixed(2) + "s）· " + st.reason;
+  } else {
+    verdict.className = "badge ok";
+    verdict.textContent = "✓ 收敛 / 有界" + (sc.reached ? " · 已到达终点" : "");
+  }
+  const p = sc.params;
+  const ptext = Object.entries(p).map(([k, v]) => k + "=" + v).join("  ");
+  paramsEl.textContent = "v=" + sc.v + " m/s · dt=" + sc.dt + " s · " + ptext
+    + " · |e|峰值 " + st.maxAbs.toFixed(3) + " m";
+  readout.innerHTML =
+    ["x (m)", fmt(f.x, 3), "y (m)", fmt(f.y, 3), "θ (rad)", fmt(f.th, 3),
+     "ω (rad/s)", fmt(f.w, 3), "e (m)", fmt(f.e, 4),
+     "|e| 峰值 (m)", st.maxAbs.toFixed(3)]
+      .map((v, i) => i % 2 === 0 ? '<dt>' + v + '</dt>' : '<dd>' + v + '</dd>').join("");
+}
+
+function selectScenario(i) {
+  sc = DATA.scenarios[i];
+  scSel.value = i;
+  idx = 0;
+  stop();
+  render();
+}
+
+function step(d) {
+  idx = Math.max(0, Math.min(sc.frames.length - 1, idx + d));
+  render();
+}
+
+function playLoop(t) {
+  if (!playing) return;
+  if (!lastWall) lastWall = t;
+  const wall = (t - lastWall) / 1000;
+  lastWall = t;
+  const speed = parseFloat(document.getElementById("speed").value);
+  const adv = wall * speed / sc.dt;
+  idx += Math.floor(adv + (playLoop._frac || 0));
+  playLoop._frac = (adv + (playLoop._frac || 0)) % 1;
+  if (idx >= sc.frames.length - 1) { idx = sc.frames.length - 1; render(); stop(); return; }
+  render();
+  raf = requestAnimationFrame(playLoop);
+}
+
+function play() {
+  if (playing) { stop(); return; }
+  if (idx >= sc.frames.length - 1) idx = 0;
+  playing = true; lastWall = 0;
+  document.getElementById("btnPlay").textContent = "⏸ 暂停";
+  raf = requestAnimationFrame(playLoop);
+}
+function stop() {
+  playing = false; playLoop._frac = 0;
+  document.getElementById("btnPlay").textContent = "▶ 播放";
+  if (raf) cancelAnimationFrame(raf);
+}
+
+// 误差图拖动/点击跳转
+let chartDrag = false;
+function seekToClient(clientX) {
+  const rect = chartCv.getBoundingClientRect();
+  const g = chartGeom();
+  const t = (clientX - rect.left - g.ml) / (g.w - g.ml - g.mr) * g.tMax;
+  let best = 0, bd = Infinity;
+  sc.frames.forEach((f, i) => {
+    const d = Math.abs(f.t - Math.max(0, Math.min(g.tMax, t)));
+    if (d < bd) { bd = d; best = i; }
+  });
+  idx = best; stop(); render();
+}
+chartCv.addEventListener("mousedown", e => { chartDrag = true; seekToClient(e.clientX); });
+window.addEventListener("mouseup", () => chartDrag = false);
+chartCv.addEventListener("mousemove", e => {
+  if (chartDrag) { seekToClient(e.clientX); return; }
+  const rect = chartCv.getBoundingClientRect();
+  const g = chartGeom();
+  if (e.clientX - rect.left < g.ml || e.clientX - rect.left > g.w - g.mr) {
+    tip.style.display = "none"; return;
+  }
+  const t = (e.clientX - rect.left - g.ml) / (g.w - g.ml - g.mr) * g.tMax;
+  let best = 0, bd = Infinity;
+  sc.frames.forEach((f, i) => {
+    const d = Math.abs(f.t - Math.max(0, Math.min(g.tMax, t)));
+    if (d < bd) { bd = d; best = i; }
+  });
+  const f = sc.frames[best];
+  tip.style.display = "block";
+  tip.innerHTML = "t=" + f.t.toFixed(2) + "s<br>e=" + f.e.toFixed(4) + " m";
+  let tx = e.clientX - rect.left + 12;
+  if (tx + 120 > g.w) tx -= 150;
+  tip.style.left = tx + "px";
+  tip.style.top = (e.clientY - rect.top + 10) + "px";
+});
+chartCv.addEventListener("mouseleave", () => tip.style.display = "none");
+
+document.getElementById("btnPlay").onclick = play;
+document.getElementById("btnFirst").onclick = () => { idx = 0; stop(); render(); };
+document.getElementById("btnPrev").onclick = () => step(-1);
+document.getElementById("btnNext").onclick = () => step(1);
+seek.addEventListener("input", () => { idx = +seek.value; stop(); render(); });
+scSel.addEventListener("change", () => selectScenario(+scSel.value));
+window.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.code === "Space") { e.preventDefault(); play(); }
+  else if (e.code === "ArrowLeft") step(-1);
+  else if (e.code === "ArrowRight") step(1);
+  else if (e.code === "Home") { idx = 0; stop(); render(); }
+  else if (e.code === "End") { idx = sc.frames.length - 1; stop(); render(); }
+});
+window.addEventListener("resize", render);
+
+selectScenario(0);
+</script>
+</body>
+</html>
