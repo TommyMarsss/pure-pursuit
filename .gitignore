@@ -19,4 +19,5 @@ go.work.sum
 /trajectory/
 
 # Demo 生成的静态报告
+/output/
 /report.html
